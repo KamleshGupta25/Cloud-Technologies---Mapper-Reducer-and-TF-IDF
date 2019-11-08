@@ -1,0 +1,83 @@
+1.	Extract the Data from Stack Exchange using below Query.
+
+select top 50000* from posts where 
+posts.ViewCount> 5000 and posts.ViewCount < 7000 and
+posts.OwnerDisplayName is not null               and
+posts.OwnerUserId is not null                    and
+posts.Score >= 0
+order by posts.ViewCount;
+
+Note: 
+The data we extracted were in 4 different excel files containing few columns which were of not our use, 
+so we combined the 4 excel extracted from the previous steps into single file (Final_QueryResults_Kamlesh.csv) and 
+removed the unwanted rows and column as part of data enrichment.
+
+
+2.	Using Pig or MapReduce, extract, transform and load the data as applicable
+
+2.1	Upload the Final_QueryResults_Kamlesh.csv on Google Cloud Platform (GCP)
+
+2.2	From GCP, upload the Data (Final_QueryResults_Kamlesh.csv) to HDFS.
+
+2.3	use the stream editor of unix to enrich the data and remove the special characters and extra space from the file (Final_QueryResults_Kamlesh.csv) if any and store the enriched data in a new file (Final.csv)
+    sed ':a;N;$!ba;s/\n/ /g' FinalQueryResults.csv > Final.csv
+
+2.4	Connect to pig to perform Extract, Tranform and Load on the Data (Final.csv) before loading into Hive.
+ - DEFINE CSVLoader org.apache.pig.piggybank.storage.CSVLoader();
+ - file = LOAD 'hdfs://cloud-technologies-m/kamleshcloud/Final.csv' using CSVLoader(',') as (Id:int,Score:int,ViewCount:int, Body:chararray,OwnerUserId:int OwnerDisplayName:chararray);
+
+2.5	Confirm from the terminal Output, Success message should be recorded once the data is successfully loaded on the HDFS
+
+2.6 Using below command confrim  whether data is present on HDFS.
+    hadoop fs -ls /kamleshcloud
+
+2.7	Connect to HIVE dataware to load the Data (Final.csv) on Test database in Table hivedata.
+    CREATE EXTERNAL TABLE IF NOT EXISTS hivedata (Id int,Score int, ViewCount int, Body String,OwnerUserId int, OwnerDisplayName String) ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' ;
+
+3.	Using Hive and/or MapReduce get
+
+3.1	The top 10 posts by score
+Query: select score,body from hivedata sort by score desc Limit 10;
+
+3.2	The top 10 users by post score
+Query: select score,ownerdisplayname  from hivedata sort by score desc Limit 10;
+
+3.3	The number of distinct users, who used the word “Hadoop” in one of their posts
+Query: select count (distinct(owneruserid)) from hivedata where (Body REGEXP 'hadoop') OR (Body REGEXP 'Hadoop');
+
+4.	TF-IDF Calculation using Map:
+Implementation of TFIDF in Hadoop using Python as three phases.
+
+ - Phase One:
+Mapper  : ((word, User_ID), 1)
+Reducer : ((word, User_ID), word_count_in_doc)
+
+ - Phase Two:
+Mapper  : (User_ID, (word, word_count_in_doc))
+Reducer : ((word, User_ID), (word_count_in_doc, words_in_doc))
+
+ - Phase Three:
+Mapper  : (word, (User_ID, word_count_in_doc, words_in_doc, 1))
+Reducer : ((word, User_ID), tf-idf)
+The mapper and reducer programs associated with each phase, and the output files are available in the repository.
+
+Hadoop commands for TF-IDF Calculation :
+
+hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar -file /home/kamlesh_gupta3/MapperPhaseOne.py  -mapper "python MapperPhaseOne.py"  -file /home/kamlesh_gupta3/ReducerPhaseOne.py -reducer  "python ReducerPhaseOne.py" -input hdfs://cloud-technologies-m/kamleshcloud/input_tfidf.txt -output  hdfs://cloud-technologies-m/kamleshcloud/OutputPhaseOne
+hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar -file /home/kamlesh_gupta3/MapperPhaseTwo.py  -mapper "python MapperPhaseTwo.py"  -file /home/kamlesh_gupta3/ReducerPhaseTwo.py -reducer  "python ReducerPhaseTwo.py" -input hdfs://cloud-technologies-m/kamleshcloud/OutputPhaseOne -output  hdfs://cloud-technologies-m/kamleshcloud/OutputPhaseTwo
+hadoop jar /usr/lib/hadoop-mapreduce/hadoop-streaming.jar -file /home/kamlesh_gupta3/MapperPhaseThree.py  -mapper "python MapperPhaseThree.py"  -file /home/kamlesh_gupta3/ReducerPhaseThree.py -reducer  "python ReducerPhaseThree.py" -input hdfs://cloud-technologies-m/kamleshcloud/OutputPhaseTwo -output  hdfs://cloud-technologies-m/kamleshcloud/OutputPhaseThree
+
+hadoop fs -getmerge hdfs://cloud-technologies-m/kamleshcloud/part-00000  hdfs://cloud-technologies-m/kamleshcloud/part-00001 /home/kamlesh_gupta3/OutputPhaseThree.csv  -- This Command is used to Merge the output (part-00000 & part-00001) into single CSV file.
+
+4.1	Using pig, Load the OutputPhaseThree.csv in hive and using Hive Query display the TF-IDF of top 10 terms for each user. 
+
+ - Pig Loading
+TFID_Data  = LOAD 'hdfs://cloud-technologies-m/kamleshcloud/OutputPhaseThree.csv' using PigStorage(',') as (Term:chararray, OwnerUserId:int, TfIdf:float);
+store TFID_Data  INTO 'hdfs://cloud-technologies-m/kamleshcloud/Hive_TFID_Data' using PigStorage(',');
+
+- Hive Loading
+create external table if not exists TFID_T (Term string, OwnerUserId Int, tfidf float) ROW FORMAT DELIMITED FIELDS TERMINATED BY ','  location 'hdfs://cloud-technologies-m/kamleshcloud/Hive_TFID_Data';
+
+- Hive Query for TF-IDF:
+select hd.OwnerDisplayName ,hd.OwnerUserId,tt.term,tt.tfidf from hivedata hd, TFID_T tt where hd.OwnerUserId = tt.OWNERUSERID AND
+hd.OwnerUserId ='33015' group by hd.OwnerDisplayName,hd.OwnerUserId,tt.term,tt.tfidf sort by tfidf desc limit 10;
